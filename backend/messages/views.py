@@ -1,6 +1,7 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 from .models import Message
 from .serializers import MessageSerializer
 from django.db.models import Q
@@ -9,10 +10,14 @@ from django.db.models import Q
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.all()
     serializer_class = MessageSerializer
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         user = self.request.user
         return Message.objects.filter(Q(sender=user) | Q(receiver=user))
+    
+    def perform_create(self, serializer):
+        serializer.save(sender=self.request.user)
     
     @action(detail=False, methods=['get'])
     def received(self, request):

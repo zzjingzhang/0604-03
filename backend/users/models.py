@@ -17,7 +17,7 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='tenant')
     phone = models.CharField(max_length=20, blank=True, null=True)
     avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='approved')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
@@ -27,3 +27,8 @@ class User(AbstractUser):
     
     def __str__(self):
         return f"{self.username} - {self.get_role_display()}"
+    
+    def save(self, *args, **kwargs):
+        if self.is_staff or self.is_superuser or self.role == 'admin':
+            self.status = 'approved'
+        super().save(*args, **kwargs)

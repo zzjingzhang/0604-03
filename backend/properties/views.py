@@ -1,13 +1,28 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Q
 from .models import Property, Favorite, RentalApplication
 from .serializers import (
     PropertySerializer, PropertyListSerializer, 
     FavoriteSerializer, RentalApplicationSerializer
 )
+
+
+class IsLandlord(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'landlord'
+
+
+class IsTenant(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'tenant'
+
+
+class IsAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'admin'
 
 
 class PropertyViewSet(viewsets.ModelViewSet):
@@ -17,7 +32,11 @@ class PropertyViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [AllowAny()]
-        return [permissions.IsAuthenticated()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'mark_rented']:
+            return [IsLandlord()]
+        if self.action in ['pending', 'approve', 'reject']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         if self.action == 'list':
@@ -32,17 +51,17 @@ class PropertyViewSet(viewsets.ModelViewSet):
         house_type = self.request.query_params.get('house_type')
         min_area = self.request.query_params.get('min_area')
         max_area = self.request.query_params.get('max_area')
+        status_filter = self.request.query_params.get('status')
         
-        if self.request.user.is_authenticated:
-            if self.request.user.role == 'landlord':
-                queryset = queryset.filter(landlord=self.request.user)
-            elif self.request.user.role == 'tenant':
+        user = self.request.user
+        if user.is_authenticated:
+            if user.role == 'landlord':
+                queryset = queryset.filter(landlord=user)
+            elif user.role == 'tenant':
                 queryset = queryset.filter(status='approved')
-            elif self.request.user.role == 'admin':
-                status_filter = self.request.query_params.get('status')
+            elif user.role == 'admin':
                 if status_filter:
                     queryset = queryset.filter(status=status_filter)
-                pass
         else:
             queryset = queryset.filter(status='approved')
         
@@ -61,18 +80,30 @@ class PropertyViewSet(viewsets.ModelViewSet):
         
         return queryset
     
+    def perform_create(self, serializer):
+        serializer.save(landlord=self.request.user)
+    
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        if instance.landlord != self.request.user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('您只能编辑自己的房源')
+        serializer.save()
+    
+    def perform_destroy(self, instance):
+        if instance.landlord != self.request.user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('您只能删除自己的房源')
+        instance.delete()
+    
     @action(detail=False, methods=['get'])
     def pending(self, request):
-        if request.user.role != 'admin':
-            return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
         properties = Property.objects.filter(status='pending')
         serializer = PropertyListSerializer(properties, many=True, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        if request.user.role != 'admin':
-            return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
         property = self.get_object()
         property.status = 'approved'
         property.save()
@@ -80,8 +111,6 @@ class PropertyViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        if request.user.role != 'admin':
-            return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
         property = self.get_object()
         property.status = 'rejected'
         property.save()
@@ -90,7 +119,7 @@ class PropertyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def mark_rented(self, request, pk=None):
         property = self.get_object()
-        if request.user.role != 'landlord' or property.landlord != request.user:
+        if property.landlord != request.user:
             return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
         property.status = 'rented'
         property.save()
@@ -100,9 +129,13 @@ class PropertyViewSet(viewsets.ModelViewSet):
 class FavoriteViewSet(viewsets.ModelViewSet):
     queryset = Favorite.objects.all()
     serializer_class = FavoriteSerializer
+    permission_classes = [IsTenant]
     
     def get_queryset(self):
         return Favorite.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
     
     @action(detail=False, methods=['delete'])
     def remove(self, request):
@@ -117,6 +150,13 @@ class RentalApplicationViewSet(viewsets.ModelViewSet):
     queryset = RentalApplication.objects.all()
     serializer_class = RentalApplicationSerializer
     
+    def get_permissions(self):
+        if self.action in ['create']:
+            return [IsTenant()]
+        if self.action in ['approve', 'reject']:
+            return [IsLandlord()]
+        return [IsAuthenticated()]
+    
     def get_queryset(self):
         user = self.request.user
         if user.role == 'tenant':
@@ -127,20 +167,28 @@ class RentalApplicationViewSet(viewsets.ModelViewSet):
             return RentalApplication.objects.all()
         return RentalApplication.objects.none()
     
+    def perform_create(self, serializer):
+        property_id = self.request.data.get('property_id')
+        property_obj = Property.objects.filter(id=property_id, status='approved').first()
+        if not property_obj:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'property_id': '房源不存在或未通过审核'})
+        serializer.save(tenant=self.request.user)
+    
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         application = self.get_object()
-        if request.user.role == 'landlord' and application.property.landlord == request.user:
-            application.status = 'approved'
-            application.save()
-            return Response({'status': '已通过'})
-        return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
+        if application.property.landlord != request.user:
+            return Response({'error': '您只能审核自己房源的申请'}, status=status.HTTP_403_FORBIDDEN)
+        application.status = 'approved'
+        application.save()
+        return Response({'status': '已通过'})
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         application = self.get_object()
-        if request.user.role == 'landlord' and application.property.landlord == request.user:
-            application.status = 'rejected'
-            application.save()
-            return Response({'status': '已拒绝'})
-        return Response({'error': '无权限'}, status=status.HTTP_403_FORBIDDEN)
+        if application.property.landlord != request.user:
+            return Response({'error': '您只能审核自己房源的申请'}, status=status.HTTP_403_FORBIDDEN)
+        application.status = 'rejected'
+        application.save()
+        return Response({'status': '已拒绝'})

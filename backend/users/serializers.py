@@ -23,10 +23,13 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({"password": "两次密码不一致"})
+        if attrs.get('role') == 'admin':
+            raise serializers.ValidationError({"role": "不允许注册管理员账号"})
         return attrs
 
     def create(self, validated_data):
         validated_data.pop('password2')
+        validated_data['status'] = 'pending'
         user = User.objects.create_user(**validated_data)
         return user
 
@@ -42,6 +45,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
+        if self.user.status == 'pending':
+            raise serializers.ValidationError({"detail": "账号待审核，请等待管理员审核通过后再登录"})
+        if self.user.status == 'rejected':
+            raise serializers.ValidationError({"detail": "账号已被拒绝，请联系管理员"})
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
